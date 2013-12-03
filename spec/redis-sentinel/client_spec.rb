@@ -3,6 +3,7 @@ require "spec_helper"
 describe Redis::Client do
   let(:client) { double("Client", :reconnect => true) }
   let(:redis)  { double("Redis", :sentinel => ["remote.server", 8888], :client => client) }
+  let(:master_name) { "my_master" }
 
   let(:sentinels) do
     [
@@ -11,8 +12,13 @@ describe Redis::Client do
     ]
   end
 
-  subject { Redis::Client.new(:master_name => "master", :master_password => "foobar",
-                              :sentinels => sentinels) }
+  subject do
+    Redis::Client.new({
+      :master_name => master_name,
+      :master_password => "foobar",
+      :sentinels => sentinels
+    })
+  end
 
   before do
     sentinels.stub(:shuffle!)
@@ -52,18 +58,54 @@ describe Redis::Client do
     end
   end
 
+  context "#get_master_run_id" do
+    let(:master_run_id) { double("master_run_id") }
+    let(:masters) do
+      [
+        ['name', master_name, 'runid', master_run_id]
+      ]
+    end
+    before do
+      redis.should_receive(:sentinel).with('masters').and_return(masters)
+    end
+
+    context "when a master is found" do
+      it "returns the master run_id" do
+        expect(subject.get_master_run_id).to eq(master_run_id)
+      end
+    end
+
+    context "when a master is not found" do
+      let(:masters) { [] }
+      it "raises a Redis::ConnectionError" do
+        expect do
+          subject.get_master_run_id
+        end.to raise_error(Redis::ConnectionError)
+      end
+    end
+
+  end
+
   context "#discover_master" do
+    let(:timestamp) { double("timestamp") }
+    let(:master_run_id) { double("master_run_id") }
+
+    before do
+      subject.stub(:current_timestamp => timestamp)
+      subject.stub(:get_master_run_id => master_run_id)
+    end
+
     it "gets the current master" do
       redis.should_receive(:sentinel).
-            with("get-master-addr-by-name", "master")
+            with("get-master-addr-by-name", master_name)
       redis.should_receive(:sentinel).
-            with("is-master-down-by-addr", "remote.server", 8888)
+            with("is-master-down-by-addr", "remote.server", 8888, timestamp, master_run_id)
       subject.discover_master
     end
 
     it "should update options" do
       redis.should_receive(:sentinel).
-            with("is-master-down-by-addr", "remote.server", 8888).once.
+            with("is-master-down-by-addr", "remote.server", 8888, timestamp, master_run_id).once.
             and_return([0, "abc"])
       subject.discover_master
       expect(subject.host).to eq "remote.server"
@@ -73,7 +115,7 @@ describe Redis::Client do
 
     it "should not update options before newly promoted master is ready" do
       redis.should_receive(:sentinel).
-            with("is-master-down-by-addr", "remote.server", 8888).twice.
+            with("is-master-down-by-addr", "remote.server", 8888, timestamp, master_run_id).twice.
             and_return([1, "abc"], [0, "?"])
       2.times do
         expect do
@@ -87,10 +129,12 @@ describe Redis::Client do
 
     it "should not use a password" do
       Redis.should_receive(:new).with({:host => "localhost", :port => 26379})
-      redis.should_receive(:sentinel).with("get-master-addr-by-name", "master")
-      redis.should_receive(:sentinel).with("is-master-down-by-addr", "remote.server", 8888)
+      redis.should_receive(:sentinel).with("get-master-addr-by-name", "another_master")
+      redis.should_receive(:sentinel).with("is-master-down-by-addr", "remote.server", 8888, timestamp, master_run_id)
 
-      redis = Redis::Client.new(:master_name => "master", :sentinels => [{:host => "localhost", :port => 26379}])
+      redis = Redis::Client.new(:master_name => "another_master", :sentinels => [{:host => "localhost", :port => 26379}])
+      redis.stub(:current_timestamp => timestamp)
+      redis.stub(:get_master_run_id => master_run_id)
       redis.discover_master
 
       expect(redis.host).to eq "remote.server"
@@ -101,13 +145,13 @@ describe Redis::Client do
     it "should select next sentinel" do
       Redis.should_receive(:new).with({:host => "localhost", :port => 26379})
       redis.should_receive(:sentinel).
-            with("get-master-addr-by-name", "master").
+            with("get-master-addr-by-name", master_name).
             and_raise(Redis::CannotConnectError)
       Redis.should_receive(:new).with({:host => "localhost", :port => 26380})
       redis.should_receive(:sentinel).
-            with("get-master-addr-by-name", "master")
+            with("get-master-addr-by-name", master_name)
       redis.should_receive(:sentinel).
-            with("is-master-down-by-addr", "remote.server", 8888)
+            with("is-master-down-by-addr", "remote.server", 8888, timestamp, master_run_id)
       subject.discover_master
       expect(subject.host).to eq "remote.server"
       expect(subject.port).to eq 8888
@@ -191,9 +235,9 @@ describe Redis::Client do
   end
 
   context "#disconnect" do
+
     it "calls disconnect on each sentinel client" do
       subject.stub(:connect)
-      subject.discover_master
       subject.send(:redis_sentinels).each do |config, sentinel|
         sentinel.client.should_receive(:disconnect)
       end
@@ -205,7 +249,6 @@ describe Redis::Client do
   context "#reconnect" do
     it "effectively reconnects on each sentinel client" do
       subject.stub(:connect)
-      subject.discover_master
 
       subject.send(:redis_sentinels).each do |config, sentinel|
         sentinel.client.should_receive(:disconnect)

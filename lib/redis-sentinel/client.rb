@@ -66,7 +66,7 @@ class Redis::Client
           if !master_host && !master_port
             raise Redis::ConnectionError.new("No master named: #{@master_name}")
           end
-          is_down, runid = sentinel.sentinel("is-master-down-by-addr", master_host, master_port)
+          is_down, runid = sentinel.sentinel("is-master-down-by-addr", master_host, master_port, current_timestamp, get_master_run_id)
           break
         rescue Redis::CannotConnectError
           try_next_sentinel
@@ -105,7 +105,29 @@ class Redis::Client
     alias call_without_readonly_protection call
     alias call call_with_readonly_protection
 
+    def get_master_run_id
+      if info = get_master_info.find{ |e| e['name'] == @master_name }
+        info['runid']
+      else
+        raise Redis::ConnectionError.new("No master named: #{@master_name}")
+      end
+    end
+
+    def current_timestamp
+      Time.now.to_i
+    end
+
   private
+
+    def get_current_sentinel
+      redis_sentinels[@sentinels[0]]
+    end
+
+    def get_master_info
+      get_current_sentinel.sentinel("masters").map do |e|
+        Hash[*e.flatten]
+      end
+    end
 
     def fetch_option(options, key)
       options.delete(key) || options.delete(key.to_s)
