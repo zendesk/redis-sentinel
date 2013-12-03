@@ -59,7 +59,7 @@ class Redis::Client
 
     def discover_master
       while true
-        sentinel = redis_sentinels[@sentinels[0]]
+        sentinel = get_current_sentinel
 
         begin
           master_host, master_port = sentinel.sentinel("get-master-addr-by-name", @master_name)
